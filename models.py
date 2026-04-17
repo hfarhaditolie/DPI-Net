@@ -120,20 +120,26 @@ class DPINet(nn.Module):
         self.use_gpu = use_gpu
         self.residual = residual
 
+        # Resolve computation device: CUDA → MPS → CPU
         if use_gpu:
-            self.pi = Variable(torch.FloatTensor([np.pi])).cuda()
-            self.dt = Variable(torch.FloatTensor([args.dt])).cuda()
-            self.mean_v = Variable(torch.FloatTensor(stat[1][:, 0])).cuda()
-            self.std_v = Variable(torch.FloatTensor(stat[1][:, 1])).cuda()
-            self.mean_p = Variable(torch.FloatTensor(stat[0][:3, 0])).cuda()
-            self.std_p = Variable(torch.FloatTensor(stat[0][:3, 1])).cuda()
+            if torch.cuda.is_available():
+                self.device = torch.device('cuda')
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                self.device = torch.device('mps')
+            else:
+                self.device = torch.device('cpu')
         else:
-            self.pi = Variable(torch.FloatTensor([np.pi]))
-            self.dt = Variable(torch.FloatTensor(args.dt))
-            self.mean_v = Variable(torch.FloatTensor(stat[1][:, 0]))
-            self.std_v = Variable(torch.FloatTensor(stat[1][:, 1]))
-            self.mean_p = Variable(torch.FloatTensor(stat[0][:3, 0]))
-            self.std_p = Variable(torch.FloatTensor(stat[0][:3, 1]))
+            self.device = torch.device('cpu')
+
+        def _t(data):
+            return torch.FloatTensor(data).to(self.device)
+
+        self.pi     = _t([np.pi])
+        self.dt     = _t([args.dt])
+        self.mean_v = _t(stat[1][:, 0])
+        self.std_v  = _t(stat[1][:, 1])
+        self.mean_p = _t(stat[0][:3, 0])
+        self.std_p  = _t(stat[0][:3, 1])
 
         # (1) particle attr (2) state
         self.particle_encoder_list = nn.ModuleList()
@@ -166,12 +172,8 @@ class DPINet(nn.Module):
     def rotation_matrix_from_quaternion(self, params):
         # params dim - 4: w, x, y, z
 
-        if self.use_gpu:
-            one = Variable(torch.ones(1, 1)).cuda()
-            zero = Variable(torch.zeros(1, 1)).cuda()
-        else:
-            one = Variable(torch.ones(1, 1))
-            zero = Variable(torch.zeros(1, 1))
+        one  = torch.ones(1, 1, device=self.device)
+        zero = torch.zeros(1, 1, device=self.device)
 
         # multiply the rotation matrix from the right-hand side
         # the matrix should be the transpose of the conventional one
@@ -193,16 +195,10 @@ class DPINet(nn.Module):
                 instance_idx, phases_dict, verbose=0):
 
         # calculate particle encoding
-        if self.use_gpu:
-            particle_effect = Variable(torch.zeros((attr.size(0), self.nf_effect)).cuda())
-        else:
-            particle_effect = Variable(torch.zeros((attr.size(0), self.nf_effect)))
+        particle_effect = torch.zeros(attr.size(0), self.nf_effect, device=self.device)
 
         # add offset to center-of-mass for rigids to attr
-        if self.use_gpu:
-            offset = Variable(torch.zeros((attr.size(0), state.size(1))).cuda())
-        else:
-            offset = Variable(torch.zeros((attr.size(0), state.size(1))))
+        offset = torch.zeros(attr.size(0), state.size(1), device=self.device)
 
         for i in range(len(instance_idx) - 1):
             st, ed = instance_idx[i], instance_idx[i + 1]

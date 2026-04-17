@@ -30,8 +30,15 @@ from models import DPINet
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-USE_GPU = torch.cuda.is_available()
+def _select_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+DEVICE  = _select_device()
+USE_GPU = DEVICE.type != "cpu"   # passed to DPINet to trigger device-aware init
 
 DATA_DIR = Path("Data")
 OUTPUT_DIR = Path("Results")
@@ -171,13 +178,13 @@ def build_relations(pos, k):
     rels   = np.array(pairs, dtype=np.int64)
     n_rels = len(rels)
 
-    Rr_idx = torch.LongTensor(np.stack([rels[:, 0], np.arange(n_rels)]))
-    Rs_idx = torch.LongTensor(np.stack([rels[:, 1], np.arange(n_rels)]))
-    values = torch.ones(n_rels)
-    Ra     = torch.zeros(n_rels, ARGS.relation_dim)
-
-    Rr = torch.sparse_coo_tensor(Rr_idx, values, (N, n_rels))
-    Rs = torch.sparse_coo_tensor(Rs_idx, values, (N, n_rels))
+    # Dense matrices: sparse ops are not supported on MPS and are optional on CPU.
+    # DPINet's .t().mm() calls work identically with dense tensors.
+    Rr = torch.zeros(N, n_rels)
+    Rs = torch.zeros(N, n_rels)
+    Rr[rels[:, 0], np.arange(n_rels)] = 1.0
+    Rs[rels[:, 1], np.arange(n_rels)] = 1.0
+    Ra = torch.zeros(n_rels, ARGS.relation_dim)
 
     return Rr, Rs, Ra, np.arange(N), np.arange(N)
 
@@ -251,7 +258,7 @@ def prepare_step(mat_t, mat_t1, stat, radii_stat):
 # TRAINING
 # ─────────────────────────────────────────────
 def _to_device(tensors):
-    return [t.cuda() if USE_GPU else t for t in tensors]
+    return [t.to(DEVICE) for t in tensors]
 
 def train(model, matrices, stat, radii_stat):
     optimizer = optim.Adam(model.parameters(), lr=LR, betas=(0.9, 0.999))
@@ -296,7 +303,7 @@ def train(model, matrices, stat, radii_stat):
                 if bottom_mask.any():
                     bottom_idx = bottom_mask.nonzero(as_tuple=False).squeeze(1)
                     if USE_GPU:
-                        bottom_idx = bottom_idx.cuda()
+                        bottom_idx = bottom_idx.to(DEVICE)
                     bottom_compress_vel = pred[bottom_idx, COMPRESS_AXIS]
                     loss = loss + LAMBDA_BOUNDARY * bottom_compress_vel.pow(2).mean()
 
